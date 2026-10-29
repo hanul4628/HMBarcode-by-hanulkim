@@ -10,6 +10,8 @@
 <meta name="theme-color" content="#002C5F">
 <title>HKMC 2D Barcode Reader</title>
 <script defer src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<!-- 보조 판독 엔진 zxing-cpp(WASM): 휘거나 기울어진 Data Matrix에 강함. 버전 고정 -->
+<script defer src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.6/dist/iife/reader/index.js"></script>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
 <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
@@ -1285,25 +1287,94 @@ function startScan(){
         width:{ideal:1920}, height:{ideal:1080}  // 기본 640×480 대신 고해상도 요청 (작은 Data Matrix 인식률↑)
       }
     },
-    function(dt){
-      // 카메라 정지 전까지 같은 바코드가 여러 번 인식될 수 있으므로 첫 결과만 처리
-      if(scanHandled) return;
-      scanHandled = true;
-      if(navigator.vibrate) navigator.vibrate(80);
-      // 결과를 먼저 보여주고 카메라는 뒤에서 정지 (카메라 종료 대기 시간만큼 체감 속도 향상)
-      processBarcode(dt);
-      closeScanner();
-    },
+    onScanSuccess,
     function(){}
   ).then(function(){
     isCameraTransitioning = false;
     enableContinuousFocus(scanner);
+    startCppLoop();   // 같은 화면을 zxing-cpp로도 동시에 판독
   }).catch(function(err){
     console.error('Camera start error:', err);
     alert(LANG[currentLang].camErr);
     isCameraTransitioning = false;
     document.getElementById('scanOverlay').classList.remove('open');
   });
+}
+
+// 두 엔진 중 먼저 읽은 쪽의 결과를 한 번만 처리
+function onScanSuccess(text){
+  // 카메라 정지 전까지 같은 바코드가 여러 번 인식될 수 있으므로 첫 결과만 처리
+  if(scanHandled) return;
+  scanHandled = true;
+  stopCppLoop();
+  if(navigator.vibrate) navigator.vibrate(80);
+  // 결과를 먼저 보여주고 카메라는 뒤에서 정지 (카메라 종료 대기 시간만큼 체감 속도 향상)
+  processBarcode(text);
+  closeScanner();
+}
+
+/* ── 보조 판독 엔진 (zxing-cpp WASM) ──
+   기본 엔진(아이폰: zxing-js, 안드로이드: 폰 내장 판독기)과 번갈아 같은 스캔 박스 영역을 판독.
+   테스트 결과 원통에 감긴 라벨에서 두 엔진을 같이 쓸 때 인식률이 가장 높았음.
+   textMode 'Plain' 필수: 기본값(HRI)은 GS/RS/EOT 제어문자를 기호로 바꿔 검증이 깨짐 */
+var CPP_OPTIONS = {formats:['DataMatrix','QRCode'], textMode:'Plain', tryInvert:false, maxNumberOfSymbols:1};
+var CPP_MAX_PX = 720;          // 판독용 이미지 최대 크기 (아이폰 처리 시간과 해상도의 균형)
+var cppGen = 0, cppTimer = null, cppCanvas = null, cppCtx = null, currentScanBox = 0;
+
+function cppAvailable(){ return typeof ZXingWASM !== 'undefined' && ZXingWASM.readBarcodes; }
+
+// 페이지가 한가할 때 WASM(약 1MB)을 미리 받아 둠 → 첫 스캔부터 바로 동작
+function preloadCpp(){
+  if(!cppAvailable()) return;
+  try{ ZXingWASM.prepareZXingModule({fireImmediately:true}).catch(function(){}); }catch(e){}
+}
+
+// 카메라 영상에서 화면의 스캔 박스와 같은 영역을 원본 해상도로 잘라냄
+function grabScanRegion(){
+  var video = document.querySelector('#qr-reader video');
+  if(!video || !video.videoWidth || !video.clientWidth || !currentScanBox) return null;
+  var ratio = video.videoWidth / video.clientWidth;
+  var src = Math.min(currentScanBox * ratio, video.videoWidth, video.videoHeight);
+  var sx = (video.videoWidth - src) / 2, sy = (video.videoHeight - src) / 2;
+  var size = Math.round(Math.min(src, CPP_MAX_PX));
+  if(!cppCanvas){
+    cppCanvas = document.createElement('canvas');
+    cppCtx = cppCanvas.getContext('2d', {willReadFrequently:true});
+  }
+  if(cppCanvas.width !== size){ cppCanvas.width = size; cppCanvas.height = size; }
+  cppCtx.drawImage(video, sx, sy, src, src, 0, 0, size, size);
+  return cppCtx.getImageData(0, 0, size, size);
+}
+
+function startCppLoop(){
+  stopCppLoop();
+  if(!cppAvailable()) return;
+  var gen = cppGen, failures = 0;
+  function next(delay){ if(gen === cppGen) cppTimer = setTimeout(tick, delay); }
+  function tick(){
+    if(gen !== cppGen || scanHandled) return;
+    var img;
+    try{ img = grabScanRegion(); }catch(e){ img = null; }
+    if(!img){ next(100); return; }
+    var t0 = performance.now();
+    ZXingWASM.readBarcodes(img, CPP_OPTIONS).then(function(results){
+      if(gen !== cppGen || scanHandled) return;
+      failures = 0;
+      var r = results && results[0];
+      if(r && r.isValid && r.text){ onScanSuccess(r.text); return; }
+      // 판독에 걸린 시간만큼 쉬어서 기본 엔진과 CPU를 나눠 씀
+      next(Math.max(40, performance.now() - t0));
+    }).catch(function(){
+      // WASM을 못 받는 네트워크 등: 몇 번 실패하면 보조 엔진만 멈추고 기본 엔진은 계속 동작
+      if(++failures < 3) next(500);
+    });
+  }
+  next(0);
+}
+
+function stopCppLoop(){
+  cppGen++;
+  clearTimeout(cppTimer);
 }
 
 // 화면에 보이는 스캔 박스 크기(px). CSS의 .scan-box / .dim-* 값과 같아야 함
@@ -1319,6 +1390,7 @@ function scanBoxFor(vfW, vfH){
   var c = Math.max(sw / vfW, sh / vfH);
   reader.style.transform = 'translate(-50%,-50%) scale(' + c + ')';
   var box = Math.floor(Math.min(SCAN_BOX_PX / c, vfW, vfH));
+  currentScanBox = box;
   return {width:box, height:box};
 }
 
@@ -1334,6 +1406,7 @@ function enableContinuousFocus(scanner){
 
 // 스캐너 종료: 항상 Promise 반환, 플래그를 finally에서 해제
 function closeScanner(){
+  stopCppLoop();
   document.getElementById('scanOverlay').classList.remove('open');
   if(html5QrCode && html5QrCode.isScanning){
     isCameraTransitioning = true;
@@ -1364,6 +1437,12 @@ document.addEventListener('visibilitychange',function(){
 
 setLang(storeGet(STORE_KEY_LANG,'ko'));
 updateHistDot();
+
+// 보조 판독 엔진 미리 불러오기 (스크립트는 defer라 DOMContentLoaded 이후에 사용 가능)
+document.addEventListener('DOMContentLoaded', function(){
+  if(window.requestIdleCallback) requestIdleCallback(preloadCpp, {timeout:3000});
+  else setTimeout(preloadCpp, 1500);
+});
 
 /* ── Lottie 초기화 ── */
 (function(){
