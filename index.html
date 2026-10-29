@@ -9,11 +9,12 @@
 <meta name="apple-mobile-web-app-title" content="HKMC Barcode">
 <meta name="theme-color" content="#002C5F">
 <title>HKMC 2D Barcode Reader</title>
-<script defer src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<!-- 라이브러리는 저장소(vendor/)에 포함: 외부 서버 상태와 무관하게 동작, 오프라인 저장 대상 -->
+<script defer src="vendor/html5-qrcode.min.js"></script>
 <!-- 보조 판독 엔진 zxing-cpp(WASM): 휘거나 기울어진 Data Matrix에 강함. 버전 고정 -->
 <script defer src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.6/dist/iife/reader/index.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+<script defer src="vendor/html2canvas.min.js"></script>
+<script defer src="vendor/lottie.min.js"></script>
 <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -277,6 +278,10 @@ body {
 .lang-opt:last-child{border-bottom:none}
 .lang-opt:active{background:var(--bg)}
 .lang-check{color:var(--p);font-weight:900;display:none}
+
+/* NG 사유 */
+.ng-why{color:var(--red);font-size:11.5px;font-weight:700;line-height:1.35;margin-top:3px;word-break:keep-all}
+.ng-why::before{content:'⚠ '}
 
 /* ── SCANNER OVERLAY ── */
 .scan-overlay {
@@ -704,11 +709,15 @@ function DataAnalyzer(){
   }
 
   // 결과 데이터 추가 (선택된 레코드만)
-  function dd(t,ok,d,ri){
+  // RD 행 형식: [항목코드, 'OK'|'NG', 데이터HTML, NG사유코드, 사유에 들어갈 값]
+  function dd(t,ok,d,ri,why,arg){
     if(sel===ri){
       // Header(00), Trailer(50)은 특수문자 체크 제외
-      if(t!=='00'&&t!=='50'&&ba(d))ok=false;
-      RD.push([t, ok?'OK':'NG', d!=null?ad(d):null]);
+      if(t!=='00'&&t!=='50'&&ba(d)){
+        if(ok){why='badChar';arg=null;}
+        ok=false;
+      }
+      RD.push([t, ok?'OK':'NG', d!=null?ad(d):null, ok?null:(why||null), ok?null:(arg||null)]);
     }
   }
 
@@ -731,7 +740,7 @@ function DataAnalyzer(){
         } else if(rd[0]===91){
           var c=-1;
           rd.some(function(v,i){if(v===29){c=i;return true;}return false;});
-          if(c>0){e00=1;result=false;dd('00',false,rd.slice(0,c),ri);}
+          if(c>0){e00=1;result=false;dd('00',false,rd.slice(0,c),ri,'hdrFmt');}
         }
       } else {
         result=false;
@@ -747,7 +756,7 @@ function DataAnalyzer(){
           dd('50',true,rd.slice(rd.length-2),ri);
         } else {
           result=false;
-          dd('50',false,lb(rd),ri);
+          dd('50',false,lb(rd),ri,'trlFmt');
         }
       }
 
@@ -759,32 +768,32 @@ function DataAnalyzer(){
         if(pd[0]===86){
           e10=1;
           var ok10=(pd.length===5);
-          dd('10',ok10,pd.slice(1),ri);
+          dd('10',ok10,pd.slice(1),ri,'len',{need:4,cur:pd.length-1});
           if(!ok10)result=false;
         }
         // P(80): 부품번호 — 11~16자리 (P 포함), 하이픈(-=45) 불가
         else if(pd[0]===80){
           e11=1;
           if(pd.length>10&&pd.length<17){
-            dd('11',!hc(pd,45),pd.slice(1),ri);
+            dd('11',!hc(pd,45),pd.slice(1),ri,'hyphen');
             if(hc(pd,45))result=false;
           } else {
             result=false;
-            dd('11',false,pd.slice(1),ri);
+            dd('11',false,pd.slice(1),ri,'lenRange',{min:10,max:15,cur:pd.length-1});
           }
         }
         // S(83): 서열코드 — S 포함 1~9자리
         else if(pd[0]===83){
           e12=1;
           var ok12=(pd.length>=1&&pd.length<10);
-          dd('12',ok12,pd.slice(1),ri);
+          dd('12',ok12,pd.slice(1),ri,'lenMax',{max:8,cur:pd.length-1});
           if(!ok12)result=false;
         }
         // E(69): EO번호 — E만 있거나 (E+9~10자리)
         else if(pd[0]===69){
           e13=1;
           var ok13=((pd.length>8&&pd.length<11)||pd.length===1);
-          dd('13',ok13,pd.slice(1),ri);
+          dd('13',ok13,pd.slice(1),ri,'eoLen',{cur:pd.length-1});
           if(!ok13)result=false;
         }
         // T(84): 추적정보 — 생산일자/부품4M/A or @/추적번호 복합
@@ -792,7 +801,7 @@ function DataAnalyzer(){
           if(pd.length>6){
             e20=1;
             var dateOk=vd(pd.slice(1,7));
-            dd('20',dateOk,pd.slice(1,7),ri);
+            dd('20',dateOk,pd.slice(1,7),ri,'date');
             if(!dateOk)result=false;
           }
           if(pd.length>7){
@@ -801,13 +810,13 @@ function DataAnalyzer(){
               dd('21',true,pd.slice(7,11),ri);
             } else {
               result=false;
-              dd('21',false,pd.slice(7),ri);
+              dd('21',false,pd.slice(7),ri,'len',{need:4,cur:pd.length-7});
             }
           }
           if(pd.length>11){
             e22=1;
             var aOk=(pd[11]===64||pd[11]===65); // '@'=64, 'A'=65
-            dd('22',aOk,pd[11],ri);
+            dd('22',aOk,pd[11],ri,'aOrAt');
             if(!aOk)result=false;
           }
           if(pd.length>12){
@@ -819,7 +828,7 @@ function DataAnalyzer(){
         else if(pd[0]>48&&pd[0]<58){
           e30=1;
           var ok30=(pd.length>1&&pd.length<42);
-          dd('30',ok30,pd.slice(2),ri);
+          dd('30',ok30,pd.slice(2),ri,pd.length<=1?'empty':'lenMax',{max:40,cur:pd.length-1});
           if(!ok30)result=false;
         }
         // M(77): 초도품구분 — M만 있거나, M+Y(89) or M+N(78)
@@ -830,35 +839,35 @@ function DataAnalyzer(){
             dd('31',true,null,ri);
           } else if(pd.length===2){
             var m31ok=(pd[1]===89||pd[1]===78); // 'Y'=89, 'N'=78
-            dd('31',m31ok,pd[1],ri);
+            dd('31',m31ok,pd[1],ri,'yn');
             if(!m31ok)result=false;
           } else {
             // 3자리 이상: NG
             result=false;
-            dd('31',false,pd.slice(1),ri);
+            dd('31',false,pd.slice(1),ri,'yn');
           }
         }
         // C(67): 업체영역 — C 포함 1~51자리
         else if(pd[0]===67){
           e40=1;
           var ok40=(pd.length>=1&&pd.length<52);
-          dd('40',ok40,pd.slice(1),ri);
+          dd('40',ok40,pd.slice(1),ri,'lenMax',{max:50,cur:pd.length-1});
           if(!ok40)result=false;
         }
       });
 
       // ── 필수 필드 누락 처리 ──
-      if(!e00){result=false;dd('00',false,fb(rd),ri);}
-      if(!e10){result=false;dd('10',false,null,ri);}
-      if(!e11){result=false;dd('11',false,null,ri);}
+      if(!e00){result=false;dd('00',false,fb(rd),ri,'hdrFmt');}
+      if(!e10){result=false;dd('10',false,null,ri,'missing');}
+      if(!e11){result=false;dd('11',false,null,ri,'missing');}
       if(!e12){         dd('12',true, null,ri);}  // 서열코드: Optional
       if(!e13){         dd('13',true, null,ri);}  // EO번호: Optional
-      if(!e20){result=false;dd('20',false,null,ri);}
-      if(!e21){result=false;dd('21',false,null,ri);}
-      if(!e22){result=false;dd('22',false,null,ri);}
-      if(!e23){result=false;dd('23',false,null,ri);}
+      if(!e20){result=false;dd('20',false,null,ri,'missing');}
+      if(!e21){result=false;dd('21',false,null,ri,'missing');}
+      if(!e22){result=false;dd('22',false,null,ri,'missing');}
+      if(!e23){result=false;dd('23',false,null,ri,'missing');}
       // e30, e31, e40: Optional — 없어도 PASS
-      if(!e50){result=false;dd('50',false,lb(rd),ri);}
+      if(!e50){result=false;dd('50',false,lb(rd),ri,'trlFmt');}
     });
 
     return result;
@@ -885,7 +894,11 @@ var LANG={
     heroBtn:'바코드 스캔 시작',secBarcodeData:'바코드 데이터',secAnalysis:'분석 상세',
     rawDataSub:'Raw data',rescanBtn:'다시 스캔',navScan:'스캔',navHistText:'이력',saveImg:'저장',
     camErr:'카메라 접근에 실패했습니다.\n카메라 권한을 확인해주세요.',saveErr:'이미지 저장에 실패했습니다.',
-    saveShare:'사진 앱에 저장',saveHint:'이미지를 길게 눌러 \'사진 앱에 저장\'을 선택해도 됩니다',clearConfirm:'전체 이력을 삭제하시겠습니까?'
+    saveShare:'사진 앱에 저장',saveHint:'이미지를 길게 눌러 \'사진 앱에 저장\'을 선택해도 됩니다',clearConfirm:'전체 이력을 삭제하시겠습니까?',
+    why:{missing:'필수 항목 누락',hdrFmt:'헤더 형식 오류 — [)>␞06␝ 로 시작해야 함',trlFmt:'트레일러 형식 오류 — ␝␞␄ 로 끝나야 함',
+      len:'{need}자리여야 함 (현재 {cur}자리)',lenRange:'{min}~{max}자리여야 함 (현재 {cur}자리)',lenMax:'{max}자리 이하여야 함 (현재 {cur}자리)',
+      eoLen:'비우거나 8~9자리여야 함 (현재 {cur}자리)',hyphen:'하이픈(-) 사용 불가',date:'존재하지 않는 날짜 (YYMMDD)',
+      aOrAt:"'A' 또는 '@' 이어야 함",yn:"'Y' 또는 'N' 이어야 함",badChar:'허용되지 않는 문자 포함 (영문·숫자 외)',empty:'데이터 없음'}
   },
   es:{
     standard:'Estándar 2D H/KMC',
@@ -906,7 +919,11 @@ var LANG={
     heroBtn:'Iniciar escaneo',secBarcodeData:'Datos del código',secAnalysis:'Detalle análisis',
     rawDataSub:'Datos brutos',rescanBtn:'Escanear de nuevo',navScan:'Escanear',navHistText:'Historial',saveImg:'Guardar',
     camErr:'No se pudo acceder a la cámara.\nRevise los permisos de la cámara.',saveErr:'No se pudo guardar la imagen.',
-    saveShare:'Guardar en Fotos',saveHint:'También puede mantener pulsada la imagen y elegir \'Guardar en Fotos\'',clearConfirm:'¿Borrar todo el historial?'
+    saveShare:'Guardar en Fotos',saveHint:'También puede mantener pulsada la imagen y elegir \'Guardar en Fotos\'',clearConfirm:'¿Borrar todo el historial?',
+    why:{missing:'Campo obligatorio ausente',hdrFmt:'Formato de encabezado inválido — debe iniciar con [)>␞06␝',trlFmt:'Formato de cierre inválido — debe terminar con ␝␞␄',
+      len:'Debe tener {need} caracteres (actual {cur})',lenRange:'Debe tener {min}~{max} caracteres (actual {cur})',lenMax:'Máximo {max} caracteres (actual {cur})',
+      eoLen:'Vacío o 8~9 caracteres (actual {cur})',hyphen:'No se permite guion (-)',date:'Fecha inexistente (AAMMDD)',
+      aOrAt:"Debe ser 'A' o '@'",yn:"Debe ser 'Y' o 'N'",badChar:'Contiene caracteres no permitidos (solo letras y números)',empty:'Sin datos'}
   },
   en:{
     standard:'H/KMC Part 2D Barcode Std.',
@@ -927,7 +944,11 @@ var LANG={
     heroBtn:'Start Barcode Scan',secBarcodeData:'Barcode Data',secAnalysis:'Analysis Detail',
     rawDataSub:'Raw data',rescanBtn:'Scan Again',navScan:'Scan',navHistText:'History',saveImg:'Save',
     camErr:'Camera access failed.\nPlease check camera permissions.',saveErr:'Failed to save image.',
-    saveShare:'Save to Photos',saveHint:'Or long-press the image and choose \'Save to Photos\'',clearConfirm:'Clear all history?'
+    saveShare:'Save to Photos',saveHint:'Or long-press the image and choose \'Save to Photos\'',clearConfirm:'Clear all history?',
+    why:{missing:'Required field missing',hdrFmt:'Invalid header — must start with [)>␞06␝',trlFmt:'Invalid trailer — must end with ␝␞␄',
+      len:'Must be {need} characters (now {cur})',lenRange:'Must be {min}–{max} characters (now {cur})',lenMax:'Max {max} characters (now {cur})',
+      eoLen:'Empty or 8–9 characters (now {cur})',hyphen:'Hyphen (-) not allowed',date:'Invalid date (YYMMDD)',
+      aOrAt:"Must be 'A' or '@'",yn:"Must be 'Y' or 'N'",badChar:'Contains disallowed characters (letters/digits only)',empty:'No data'}
   }
 };
 
@@ -1103,9 +1124,20 @@ function switchTab(idx){
 
 function renderTable(RD,L){
   var f={};RD.forEach(function(r){f[r[0]]=true;});
-  function gR(c){var rw=null;RD.forEach(function(r){if(r[0]===c)rw=r;});return rw?{r:rw[1],d:rw[2]}:{r:null,d:null};}
+  function gR(c){var rw=null;RD.forEach(function(r){if(r[0]===c)rw=r;});return rw?{r:rw[1],d:{data:rw[2],why:rw[3],arg:rw[4]}}:{r:null,d:null};}
+  // NG 사유 문구: {need},{cur} 등 자리표시자를 값으로 바꿈
+  function whyText(code,arg){
+    var t=(L.why&&L.why[code])||'';
+    if(arg)t=t.replace(/\{(\w+)\}/g,function(m,k){return arg[k]!=null?arg[k]:m;});
+    return t;
+  }
   function bH(r){if(!r)return'-';if(r==='OK')return'<span class="badge-ok">OK</span>';if(r==='NG')return'<span class="badge-ng">NG</span>';return r;}
-  function dH(d){return d?'<span class="td-data">'+d+'</span>':'';}
+  function dH(o){
+    if(!o)return'';
+    var h=o.data?'<span class="td-data">'+o.data+'</span>':'';
+    if(o.why)h+='<div class="ng-why">'+escapeHtml(whyText(o.why,o.arg))+'</div>';
+    return h;
+  }
   var h='<thead><tr><th colspan="2">'+L.item+'</th><th style="width:54px">'+L.result+'</th><th>'+L.data+'</th></tr></thead><tbody>';
   var rh=gR('00');h+='<tr><td colspan="2" class="td-head">'+L.header+'</td><td class="td-center">'+(rh.r?bH(rh.r):'-')+'</td><td>'+dH(rh.d)+'</td></tr>';
   h+='<tr><td rowspan="4" class="td-head">'+L.spec+'</td><td class="td-head">'+L.supplier+'</td><td class="td-center">'+(gR('10').r?bH(gR('10').r):'-')+'</td><td>'+dH(gR('10').d)+'</td></tr>';
@@ -1531,6 +1563,13 @@ document.addEventListener('visibilitychange',function(){
 
 setLang(storeGet(STORE_KEY_LANG,'ko'));
 updateHistDot();
+
+// 오프라인 동작: 한 번 열면 앱과 라이브러리를 기기에 저장 (sw.js)
+if('serviceWorker' in navigator){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('sw.js').catch(function(e){ console.warn('SW register failed', e); });
+  });
+}
 
 // 보조 판독 엔진 미리 불러오기 (스크립트는 defer라 DOMContentLoaded 이후에 사용 가능)
 document.addEventListener('DOMContentLoaded', function(){
