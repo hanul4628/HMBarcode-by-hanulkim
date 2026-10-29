@@ -289,7 +289,7 @@ body {
      (예전 object-fit:cover는 실제 판독 영역이 가로로 찌그러지고 박스보다 넓게 어긋났음)
    - 레이아웃은 화면의 2배 크기로 두고 transform으로 축소 → 판독용 캔버스 해상도가 약 1.6배 커짐
    - 실제 축소 비율은 카메라가 켜질 때 scanBoxFor()에서 화면을 꽉 채우도록 다시 계산 */
-#qr-reader{position:absolute;left:50%;top:50%;width:200%;transform:translate(-50%,-50%) scale(.5);transform-origin:center center}
+#qr-reader{position:absolute !important;left:50%;top:50%;width:200%;transform:translate(-50%,-50%) scale(.5);transform-origin:center center}
 #qr-reader video{display:block;width:100%;height:auto}
 #qr-shaded-region{display:none !important}
 
@@ -945,6 +945,8 @@ function updateHistDot(){
   dot.textContent=historyList.length>9?'9+':String(historyList.length);
 }
 var isCameraTransitioning = false; // 카메라 상태 전이 제어 변수 추가
+var pendingStart = false;   // 카메라가 꺼지는 중에 스캔 버튼을 누르면 꺼진 뒤 바로 시작
+var scanSession = 0;        // 시작 도중 취소됐는지 구분하는 번호
 
 /* ── Page nav ── */
 function showPage(n){
@@ -987,7 +989,8 @@ function setLang(lang){
     histClear:'clearAll',
     histClose:'close',
     langPageTitle:'selectLang',
-    stopScanBtn:'stopScan',
+    stopScanSpan:'stopScan',
+    langClose:'close',
     heroLabel:'heroLabel',
     heroValue:'heroValue',
     heroSub:'heroSub',
@@ -1329,8 +1332,9 @@ function clearHistory(){
 /* ── Scanner ── */
 // 스캐너 시작: 이미 전환 중이거나 스캔 중이면 무시
 function startScan(){
-  if(isCameraTransitioning) return;
+  if(isCameraTransitioning){ pendingStart = true; return; }
   if(html5QrCode && html5QrCode.isScanning) return;
+  pendingStart = false;
 
   if(typeof Html5Qrcode === 'undefined'){
     alert(LANG[currentLang].camErr);
@@ -1352,6 +1356,7 @@ function startScan(){
   scanHandled = false;
   isCameraTransitioning = true;
   var scanner = html5QrCode;
+  var session = ++scanSession;
   scanner.start(
     {facingMode:"environment"},
     {
@@ -1366,10 +1371,16 @@ function startScan(){
     onScanSuccess,
     function(){}
   ).then(function(){
+    if(session !== scanSession){
+      // 카메라가 켜지는 도중에 중지/화면전환이 있었음 → 보이지 않는 채로 켜져 있지 않게 바로 끔
+      return scanner.stop().then(function(){ try{ scanner.clear(); }catch(e){} })
+        .catch(function(){}).finally(finishTransition);
+    }
     isCameraTransitioning = false;
     enableContinuousFocus(scanner);
     startCppLoop();   // 같은 화면을 zxing-cpp로도 동시에 판독
   }).catch(function(err){
+    if(session !== scanSession){ finishTransition(); return; }  // 취소된 시작의 오류는 무시
     console.error('Camera start error:', err);
     alert(LANG[currentLang].camErr);
     isCameraTransitioning = false;
@@ -1463,6 +1474,7 @@ function scanBoxFor(vfW, vfH){
   var reader = document.getElementById('qr-reader');
   var sw = overlay.clientWidth || window.innerWidth;
   var sh = overlay.clientHeight || window.innerHeight;
+  if(!vfW || !vfH){ currentScanBox = SCAN_BOX_PX; return {width:SCAN_BOX_PX, height:SCAN_BOX_PX}; }
   var c = Math.max(sw / vfW, sh / vfH);
   reader.style.transform = 'translate(-50%,-50%) scale(' + c + ')';
   var box = Math.floor(Math.min(SCAN_BOX_PX / c, vfW, vfH));
@@ -1480,9 +1492,17 @@ function enableContinuousFocus(scanner){
   }catch(e){}
 }
 
+// 카메라 전환이 끝났을 때: 그 사이 스캔 버튼이 눌렸으면 이어서 시작
+function finishTransition(){
+  isCameraTransitioning = false;
+  if(pendingStart){ pendingStart = false; startScan(); }
+}
+
 // 스캐너 종료: 항상 Promise 반환, 플래그를 finally에서 해제
 function closeScanner(){
   stopCppLoop();
+  scanSession++;   // 아직 켜지는 중인 카메라가 있으면 켜진 직후 꺼지도록 표시
+  pendingStart = false;
   document.getElementById('scanOverlay').classList.remove('open');
   if(html5QrCode && html5QrCode.isScanning){
     isCameraTransitioning = true;
@@ -1492,15 +1512,13 @@ function closeScanner(){
       instance.clear();
     }).catch(function(err){
       console.error('Camera stop error:', err);
-    }).finally(function(){
-      isCameraTransitioning = false;
-    });
+    }).finally(finishTransition);
   }
-  // 스캔 중이 아니어도 인스턴스 초기화 (비정상 상태 방지)
-  if(html5QrCode){
+  // 켜지는 중이면 인스턴스는 시작 완료 후 위에서 정리됨. 그 외에는 초기화 (비정상 상태 방지)
+  if(html5QrCode && !isCameraTransitioning){
     try{ html5QrCode.clear(); }catch(e){}
-    html5QrCode = null;
   }
+  html5QrCode = null;
   return Promise.resolve();
 }
 
