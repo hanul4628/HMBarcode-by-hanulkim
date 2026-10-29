@@ -884,7 +884,8 @@ var LANG={
     heroLabel:'바코드 분석기',heroValue:'스캔 대기 중',heroSub:'아래 버튼을 눌러 스캔하세요',
     heroBtn:'바코드 스캔 시작',secBarcodeData:'바코드 데이터',secAnalysis:'분석 상세',
     rawDataSub:'Raw data',rescanBtn:'다시 스캔',navScan:'스캔',navHistText:'이력',saveImg:'저장',
-    camErr:'카메라 접근에 실패했습니다.\n카메라 권한을 확인해주세요.',saveErr:'이미지 저장에 실패했습니다.',clearConfirm:'전체 이력을 삭제하시겠습니까?'
+    camErr:'카메라 접근에 실패했습니다.\n카메라 권한을 확인해주세요.',saveErr:'이미지 저장에 실패했습니다.',
+    saveShare:'사진 앱에 저장',saveHint:'이미지를 길게 눌러 \'사진 앱에 저장\'을 선택해도 됩니다',clearConfirm:'전체 이력을 삭제하시겠습니까?'
   },
   es:{
     standard:'Estándar 2D H/KMC',
@@ -904,7 +905,8 @@ var LANG={
     heroLabel:'Analizador',heroValue:'Esperando escaneo',heroSub:'Pulse el botón para escanear',
     heroBtn:'Iniciar escaneo',secBarcodeData:'Datos del código',secAnalysis:'Detalle análisis',
     rawDataSub:'Datos brutos',rescanBtn:'Escanear de nuevo',navScan:'Escanear',navHistText:'Historial',saveImg:'Guardar',
-    camErr:'No se pudo acceder a la cámara.\nRevise los permisos de la cámara.',saveErr:'No se pudo guardar la imagen.',clearConfirm:'¿Borrar todo el historial?'
+    camErr:'No se pudo acceder a la cámara.\nRevise los permisos de la cámara.',saveErr:'No se pudo guardar la imagen.',
+    saveShare:'Guardar en Fotos',saveHint:'También puede mantener pulsada la imagen y elegir \'Guardar en Fotos\'',clearConfirm:'¿Borrar todo el historial?'
   },
   en:{
     standard:'H/KMC Part 2D Barcode Std.',
@@ -924,7 +926,8 @@ var LANG={
     heroLabel:'Barcode Analyzer',heroValue:'Waiting for scan',heroSub:'Press the button below to scan',
     heroBtn:'Start Barcode Scan',secBarcodeData:'Barcode Data',secAnalysis:'Analysis Detail',
     rawDataSub:'Raw data',rescanBtn:'Scan Again',navScan:'Scan',navHistText:'History',saveImg:'Save',
-    camErr:'Camera access failed.\nPlease check camera permissions.',saveErr:'Failed to save image.',clearConfirm:'Clear all history?'
+    camErr:'Camera access failed.\nPlease check camera permissions.',saveErr:'Failed to save image.',
+    saveShare:'Save to Photos',saveHint:'Or long-press the image and choose \'Save to Photos\'',clearConfirm:'Clear all history?'
   }
 };
 
@@ -1124,6 +1127,7 @@ function renderTable(RD,L){
 function saveResultImage(){
   var RD = analyzer.getResultData();
   if(!RD || RD.length === 0) return;
+  if(typeof html2canvas === 'undefined'){ alert(LANG[currentLang].saveErr); return; }
 
   var barcodePanel = document.getElementById('barcodePanel');
   var resultPanel  = document.getElementById('resultPanel');
@@ -1207,12 +1211,7 @@ function saveResultImage(){
         + String(now.getDate()).padStart(2,'0')
         + '_' + String(now.getHours()).padStart(2,'0')
         + String(now.getMinutes()).padStart(2,'0');
-      var link = document.createElement('a');
-      link.download = 'HKMC_' + ts + '.png';
-      link.href = canvas.toDataURL('image/png');
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      deliverImage(canvas, 'HKMC_' + ts + '.png');
     }).catch(function(err){
       if(document.body.contains(wrapper)) document.body.removeChild(wrapper);
       if(btn){ btn.disabled = false; btn.style.opacity = ''; }
@@ -1227,6 +1226,83 @@ function saveResultImage(){
       doCapture();
     });
   }, 150);
+}
+
+/* ── 이미지 전달 ──
+   아이폰은 <a download>로 저장하면 사진 앱이 아니라 '파일' 앱으로 가고,
+   홈 화면에 추가한 앱 모드에서는 아예 동작하지 않음 → 공유 시트(이미지 저장)를 사용 */
+function isIOS(){
+  return /iP(hone|ad|od)/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function deliverImage(canvas, filename){
+  canvas.toBlob(function(blob){
+    if(!blob){ alert(LANG[currentLang].saveErr); return; }
+    var url = URL.createObjectURL(blob);
+    if(!isIOS()){
+      // 안드로이드/PC: 기존처럼 바로 다운로드
+      var link = document.createElement('a');
+      link.download = filename;
+      link.href = url;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+      return;
+    }
+    var file = null;
+    try{ file = new File([blob], filename, {type:'image/png'}); }catch(e){}
+    var canShare = !!(file && navigator.canShare && navigator.canShare({files:[file]}));
+    if(canShare){
+      // 저장 버튼을 누른 직후라 바로 공유 시트를 띄울 수 있으면 띄움
+      navigator.share({files:[file]}).then(function(){
+        URL.revokeObjectURL(url);
+      }).catch(function(err){
+        if(err && err.name === 'AbortError'){ URL.revokeObjectURL(url); return; } // 사용자가 취소
+        showImagePreview(url, file);  // 권한 등으로 막히면 미리보기에서 한 번 더 누르게 함
+      });
+    } else {
+      showImagePreview(url, null);
+    }
+  }, 'image/png');
+}
+
+// 미리보기: [사진 앱에 저장] 버튼(공유 시트) + 길게 눌러 저장 안내
+function showImagePreview(url, file){
+  var L = LANG[currentLang];
+  var old = document.getElementById('imgPreview');
+  if(old) old.remove();
+  var ov = document.createElement('div');
+  ov.id = 'imgPreview';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:calc(16px + env(safe-area-inset-top,0px)) 16px calc(16px + env(safe-area-inset-bottom,0px));box-sizing:border-box';
+  var img = document.createElement('img');
+  img.src = url;
+  img.alt = '';
+  img.style.cssText = 'max-width:100%;max-height:68vh;border-radius:12px;background:#fff;-webkit-touch-callout:default;user-select:auto';
+  var hint = document.createElement('div');
+  hint.textContent = L.saveHint;
+  hint.style.cssText = 'color:rgba(255,255,255,.75);font-size:13px;font-weight:600;text-align:center';
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:10px;width:100%;max-width:430px';
+  var btnCss = 'flex:1;padding:15px;border:none;border-radius:14px;font-family:inherit;font-size:15px;font-weight:800;cursor:pointer';
+  function close(){ ov.remove(); setTimeout(function(){ URL.revokeObjectURL(url); }, 1000); }
+  if(file){
+    var share = document.createElement('button');
+    share.textContent = L.saveShare;
+    share.style.cssText = btnCss + ';background:#10b981;color:#fff';
+    share.onclick = function(){
+      navigator.share({files:[file]}).then(close).catch(function(){});
+    };
+    row.appendChild(share);
+  }
+  var cls = document.createElement('button');
+  cls.textContent = L.close;
+  cls.style.cssText = btnCss + ';background:rgba(255,255,255,.15);color:#fff';
+  cls.onclick = close;
+  row.appendChild(cls);
+  ov.appendChild(img); ov.appendChild(hint); ov.appendChild(row);
+  document.body.appendChild(ov);
 }
 
 function renderHistory(){
