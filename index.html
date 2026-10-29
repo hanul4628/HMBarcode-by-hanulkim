@@ -279,11 +279,17 @@ body {
 /* ── SCANNER OVERLAY ── */
 .scan-overlay {
   position:fixed; inset:0; z-index:100; background:#000;
-  display:none; flex-direction:column;
+  display:none; flex-direction:column; overflow:hidden;
 }
 .scan-overlay.open{display:flex}
-#qr-reader{position:absolute;inset:0;width:100%;height:100%}
-#qr-reader video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+/* 스캔 정확도 핵심:
+   - 카메라 영상은 원래 비율 그대로 배치해야 라이브러리가 화면의 스캔 박스와 같은 영역을 읽음
+     (예전 object-fit:cover는 실제 판독 영역이 가로로 찌그러지고 박스보다 넓게 어긋났음)
+   - 레이아웃은 화면의 2배 크기로 두고 transform으로 축소 → 판독용 캔버스 해상도가 약 1.6배 커짐
+   - 실제 축소 비율은 카메라가 켜질 때 scanBoxFor()에서 화면을 꽉 채우도록 다시 계산 */
+#qr-reader{position:absolute;left:50%;top:50%;width:200%;transform:translate(-50%,-50%) scale(.5);transform-origin:center center}
+#qr-reader video{display:block;width:100%;height:auto}
+#qr-shaded-region{display:none !important}
 
 .scan-ui{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
 .dim-t{position:absolute;top:0;left:0;right:0;height:calc(50% - 125px);background:rgba(0,0,0,.6)}
@@ -1267,29 +1273,63 @@ function startScan(){
 
   scanHandled = false;
   isCameraTransitioning = true;
-  html5QrCode.start(
+  var scanner = html5QrCode;
+  scanner.start(
     {facingMode:"environment"},
-    {fps:10, qrbox:{width:250,height:250}},
+    {
+      fps:25,              // 판독 시도 간 대기 40ms (기존 100ms)
+      qrbox:scanBoxFor,    // 화면의 250px 스캔 박스와 정확히 같은 영역을 고해상도로 판독
+      disableFlip:true,    // 후면 카메라는 좌우반전 판독이 필요 없음 → 실패 프레임마다 2번 하던 판독을 1번으로
+      videoConstraints:{
+        facingMode:'environment',
+        width:{ideal:1920}, height:{ideal:1080}  // 기본 640×480 대신 고해상도 요청 (작은 Data Matrix 인식률↑)
+      }
+    },
     function(dt){
       // 카메라 정지 전까지 같은 바코드가 여러 번 인식될 수 있으므로 첫 결과만 처리
       if(scanHandled) return;
       scanHandled = true;
       if(navigator.vibrate) navigator.vibrate(80);
-      // 스캔 성공: 카메라 종료 후 결과 처리
-      closeScanner().then(function(){
-        isCameraTransitioning = false;
-        processBarcode(dt);
-      });
+      // 결과를 먼저 보여주고 카메라는 뒤에서 정지 (카메라 종료 대기 시간만큼 체감 속도 향상)
+      processBarcode(dt);
+      closeScanner();
     },
     function(){}
   ).then(function(){
     isCameraTransitioning = false;
+    enableContinuousFocus(scanner);
   }).catch(function(err){
     console.error('Camera start error:', err);
     alert(LANG[currentLang].camErr);
     isCameraTransitioning = false;
     document.getElementById('scanOverlay').classList.remove('open');
   });
+}
+
+// 화면에 보이는 스캔 박스 크기(px). CSS의 .scan-box / .dim-* 값과 같아야 함
+var SCAN_BOX_PX = 250;
+
+// 카메라 영상 크기가 정해지면 호출됨: 영상이 화면을 꽉 채우도록 배율을 정하고,
+// 화면상 250px 박스에 해당하는 판독 영역 크기를 레이아웃 기준으로 돌려줌
+function scanBoxFor(vfW, vfH){
+  var overlay = document.getElementById('scanOverlay');
+  var reader = document.getElementById('qr-reader');
+  var sw = overlay.clientWidth || window.innerWidth;
+  var sh = overlay.clientHeight || window.innerHeight;
+  var c = Math.max(sw / vfW, sh / vfH);
+  reader.style.transform = 'translate(-50%,-50%) scale(' + c + ')';
+  var box = Math.floor(Math.min(SCAN_BOX_PX / c, vfW, vfH));
+  return {width:box, height:box};
+}
+
+// 지원 기기(주로 안드로이드)에서 연속 자동초점 켜기 — 라벨에 가까이 대도 초점이 빨리 맞음
+function enableContinuousFocus(scanner){
+  try{
+    var caps = scanner.getRunningTrackCapabilities();
+    if(caps && caps.focusMode && caps.focusMode.indexOf('continuous') >= 0){
+      scanner.applyVideoConstraints({advanced:[{focusMode:'continuous'}]}).catch(function(){});
+    }
+  }catch(e){}
 }
 
 // 스캐너 종료: 항상 Promise 반환, 플래그를 finally에서 해제
