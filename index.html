@@ -9,9 +9,9 @@
 <meta name="apple-mobile-web-app-title" content="HKMC Barcode">
 <meta name="theme-color" content="#002C5F">
 <title>HKMC 2D Barcode Reader</title>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" type="text/javascript"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+<script defer src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
 <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -556,6 +556,24 @@ body {
 <div id="flashEffect" class="flash" style="display:none"></div>
 
 <script>
+/* ── 공통 유틸 ── */
+// 바코드 내용을 innerHTML로 넣기 전 반드시 이스케이프 (악성 바코드로 인한 스크립트 실행 방지)
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+// 이력 목록용: 제어문자를 보이는 기호로 바꿔 표시
+function readableBarcode(str){
+  return escapeHtml(String(str)
+    .replace(/\x1D/g,'\u241D').replace(/\x1E/g,'\u241E').replace(/\x04/g,'\u2404')
+    .replace(/[\x00-\x1F\x7F]/g,'\uFFFD'));
+}
+// localStorage 안전 래퍼 (사생활 보호 모드 등에서 예외 방지)
+var STORE_KEY_HIST='hkmcBarcode.history', STORE_KEY_LANG='hkmcBarcode.lang';
+function storeGet(k,def){try{var v=localStorage.getItem(k);return v===null?def:JSON.parse(v);}catch(e){return def;}}
+function storeSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+
 /* ── DataAnalyzer ── */
 // 공백 제거 로직(af 함수) 원본 유지
 function DataAnalyzer(){
@@ -611,7 +629,7 @@ function DataAnalyzer(){
     if(s===4) return'<span class="eot"><sup>E</sup>O<sub>T</sub></span>';
     if(s===35)return'#<br>';
     if((s>=0&&s<=32)||s===127)return'&lt;0x'+lp(s.toString(16).toUpperCase(),2)+'&gt;';
-    return String.fromCharCode(s);
+    return escapeHtml(String.fromCharCode(s));
   }
 
   // char code 배열 → HTML 문자열
@@ -857,7 +875,8 @@ var LANG={
     scanHint:'바코드를 프레임 안에 맞춰주세요',
     heroLabel:'바코드 분석기',heroValue:'스캔 대기 중',heroSub:'아래 버튼을 눌러 스캔하세요',
     heroBtn:'바코드 스캔 시작',secBarcodeData:'바코드 데이터',secAnalysis:'분석 상세',
-    rawDataSub:'Raw data',rescanBtn:'다시 스캔',navScan:'스캔',navHistText:'이력',saveImg:'저장'
+    rawDataSub:'Raw data',rescanBtn:'다시 스캔',navScan:'스캔',navHistText:'이력',saveImg:'저장',
+    camErr:'카메라 접근에 실패했습니다.\n카메라 권한을 확인해주세요.',saveErr:'이미지 저장에 실패했습니다.',clearConfirm:'전체 이력을 삭제하시겠습니까?'
   },
   es:{
     standard:'Estándar 2D H/KMC',
@@ -876,7 +895,8 @@ var LANG={
     scanHint:'Alinee el código en el marco',
     heroLabel:'Analizador',heroValue:'Esperando escaneo',heroSub:'Pulse el botón para escanear',
     heroBtn:'Iniciar escaneo',secBarcodeData:'Datos del código',secAnalysis:'Detalle análisis',
-    rawDataSub:'Datos brutos',rescanBtn:'Escanear de nuevo',navScan:'Escanear',navHistText:'Historial',saveImg:'Guardar'
+    rawDataSub:'Datos brutos',rescanBtn:'Escanear de nuevo',navScan:'Escanear',navHistText:'Historial',saveImg:'Guardar',
+    camErr:'No se pudo acceder a la cámara.\nRevise los permisos de la cámara.',saveErr:'No se pudo guardar la imagen.',clearConfirm:'¿Borrar todo el historial?'
   },
   en:{
     standard:'H/KMC Part 2D Barcode Std.',
@@ -895,11 +915,24 @@ var LANG={
     scanHint:'Align barcode within the frame',
     heroLabel:'Barcode Analyzer',heroValue:'Waiting for scan',heroSub:'Press the button below to scan',
     heroBtn:'Start Barcode Scan',secBarcodeData:'Barcode Data',secAnalysis:'Analysis Detail',
-    rawDataSub:'Raw data',rescanBtn:'Scan Again',navScan:'Scan',navHistText:'History',saveImg:'Save'
+    rawDataSub:'Raw data',rescanBtn:'Scan Again',navScan:'Scan',navHistText:'History',saveImg:'Save',
+    camErr:'Camera access failed.\nPlease check camera permissions.',saveErr:'Failed to save image.',clearConfirm:'Clear all history?'
   }
 };
 
 var currentLang='ko', analyzer=new DataAnalyzer(), historyList=[], html5QrCode=null;
+var scanHandled=false; // 한 번의 스캔에서 결과가 중복 처리되는 것 방지
+
+historyList=storeGet(STORE_KEY_HIST,[]);
+if(!Array.isArray(historyList))historyList=[];
+
+function updateHistDot(){
+  var dot=document.getElementById('histDot');
+  if(!dot)return;
+  if(historyList.length===0){dot.style.display='none';return;}
+  dot.style.display='flex';
+  dot.textContent=historyList.length>9?'9+':String(historyList.length);
+}
 var isCameraTransitioning = false; // 카메라 상태 전이 제어 변수 추가
 
 /* ── Page nav ── */
@@ -930,7 +963,9 @@ function showPage(n){
 
 /* ── Lang ── */
 function setLang(lang){
+  if(!LANG[lang])lang='ko';
   currentLang=lang;
+  storeSet(STORE_KEY_LANG,lang);
   var L=LANG[lang];
   var m={
     secBarcode:'barcodeContent',
@@ -1032,11 +1067,8 @@ function processBarcode(data, skipHistory){
       +String(now.getMinutes()).padStart(2,'0');
     historyList.unshift({date:ds,barcode:data,okng:ok?'OK':'NG'});
     if(historyList.length>50)historyList=historyList.slice(0,50);
-    var dot=document.getElementById('histDot');
-    if(dot){
-      dot.style.display='flex';
-      dot.textContent=historyList.length>9?'9+':String(historyList.length);
-    }
+    storeSet(STORE_KEY_HIST,historyList);
+    updateHistDot();
   }
 
   // 플래시 효과
@@ -1177,7 +1209,7 @@ function saveResultImage(){
       if(document.body.contains(wrapper)) document.body.removeChild(wrapper);
       if(btn){ btn.disabled = false; btn.style.opacity = ''; }
       console.error('html2canvas error:', err);
-      alert('이미지 저장에 실패했습니다.\n' + err);
+      alert(LANG[currentLang].saveErr + '\n' + err);
     });
   };
 
@@ -1189,53 +1221,10 @@ function saveResultImage(){
   }, 150);
 }
 
-function roundRect(ctx, x, y, w, h, tl, tr, br, bl){
-  if(tr === undefined) tr = tl;
-  if(br === undefined) br = tl;
-  if(bl === undefined) bl = tl;
-
-  // 모서리 반경 최대값 제한 로직 추가
-  var maxR = Math.min(w / 2, h / 2);
-  tl = Math.min(tl, maxR);
-  tr = Math.min(tr, maxR);
-  br = Math.min(br, maxR);
-  bl = Math.min(bl, maxR);
-  
-  ctx.beginPath();
-  ctx.moveTo(x + tl, y);
-  ctx.lineTo(x + w - tr, y); ctx.quadraticCurveTo(x+w, y, x+w, y+tr);
-  ctx.lineTo(x + w, y + h - br); ctx.quadraticCurveTo(x+w, y+h, x+w-br, y+h);
-  ctx.lineTo(x + bl, y + h); ctx.quadraticCurveTo(x, y+h, x, y+h-bl);
-  ctx.lineTo(x, y + tl); ctx.quadraticCurveTo(x, y, x+tl, y);
-  ctx.closePath();
-}
-
-function buildRows(RD, L){
-  function gR(c){var rw=null;RD.forEach(function(r){if(r[0]===c)rw=r;});return rw?[rw[1],(rw[2]||'').replace(/<[^>]*>/g,'')]:[null,''];}
-  var rows = [];
-  rows.push(['Header', gR('00')[0], gR('00')[1]]);
-  var specLabel = (L.spec||'사양정보').replace('\n',' ');
-  rows.push([specLabel+' / '+(L.supplier||'업체코드'), gR('10')[0], gR('10')[1]]);
-  rows.push([specLabel+' / '+(L.partNo||'부품번호'), gR('11')[0], gR('11')[1]]);
-  rows.push([specLabel+' / '+(L.seqCode||'서열코드'), gR('12')[0], gR('12')[1]]);
-  rows.push([specLabel+' / '+(L.eoNo||'EO번호'), gR('13')[0], gR('13')[1]]);
-  var traceLabel = (L.trace||'추적정보').replace('\n',' ');
-  rows.push([traceLabel+' / '+(L.prodDate||'생산일자'), gR('20')[0], gR('20')[1]]);
-  rows.push([traceLabel+' / '+(L.part4m||'부품4M'), gR('21')[0], gR('21')[1]]);
-  rows.push([traceLabel+' / '+(L.aOrAt||'A or @'), gR('22')[0], gR('22')[1]]);
-  rows.push([traceLabel+' / '+(L.traceNo||'추적번호').replace('\n',' '), gR('23')[0], gR('23')[1]]);
-  var addLabel = (L.additional||'부가정보').replace('\n',' ');
-  if(RD.find(function(r){return r[0]==='30';})) rows.push([addLabel+' / '+(L.special||'특이정보'), gR('30')[0], gR('30')[1]]);
-  if(RD.find(function(r){return r[0]==='31';})) rows.push([addLabel+' / '+(L.initial||'초도품구분'), gR('31')[0], gR('31')[1]]);
-  if(RD.find(function(r){return r[0]==='40';})) rows.push([(L.etc||'기타')+' / '+(L.supplierArea||'업체영역'), gR('40')[0], gR('40')[1]]);
-  rows.push(['Trailer', gR('50')[0], gR('50')[1]]);
-  return rows;
-}
-
 function renderHistory(){
   var el=document.getElementById('historyContent'),L=LANG[currentLang];
   if(historyList.length===0){el.innerHTML='<div class="hist-empty"><div class="hist-empty-illust"><div class="he-bg"></div><svg class="he-svg-wrap" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg"><g class="he-ring"><circle cx="70" cy="70" r="58" fill="none" stroke="#bfdbfe" stroke-width="2" stroke-dasharray="6 5"/><circle cx="70" cy="12" r="5" fill="#60a5fa"><animate attributeName="opacity" values="0.2;0.85;0.2" dur="2s" begin="0s" repeatCount="indefinite"/><animate attributeName="r" values="4;6;4" dur="2s" begin="0s" repeatCount="indefinite"/></circle><circle cx="70" cy="128" r="5" fill="#60a5fa"><animate attributeName="opacity" values="0.2;0.85;0.2" dur="2s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="r" values="4;6;4" dur="2s" begin="0.5s" repeatCount="indefinite"/></circle><circle cx="12" cy="70" r="5" fill="#60a5fa"><animate attributeName="opacity" values="0.2;0.85;0.2" dur="2s" begin="1s" repeatCount="indefinite"/><animate attributeName="r" values="4;6;4" dur="2s" begin="1s" repeatCount="indefinite"/></circle><circle cx="128" cy="70" r="5" fill="#60a5fa"><animate attributeName="opacity" values="0.2;0.85;0.2" dur="2s" begin="1.5s" repeatCount="indefinite"/><animate attributeName="r" values="4;6;4" dur="2s" begin="1.5s" repeatCount="indefinite"/></circle></g></svg><svg class="he-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="9" width="42" height="30" rx="4" fill="#dbeafe" stroke="#93c5fd" stroke-width="2"/><rect x="8" y="14" width="3" height="20" rx="1.5" fill="#3b82f6"/><rect x="14" y="14" width="2" height="20" rx="1" fill="#93c5fd"/><rect x="19" y="14" width="4" height="20" rx="2" fill="#3b82f6"/><rect x="26" y="14" width="2" height="20" rx="1" fill="#93c5fd"/><rect x="31" y="14" width="3" height="20" rx="1.5" fill="#3b82f6"/><rect x="37" y="14" width="3" height="20" rx="1.5" fill="#bfdbfe"/><circle cx="37" cy="37" r="10" fill="#fff1f2" stroke="#fecdd3" stroke-width="1.5"/><line x1="33" y1="33" x2="41" y2="41" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round"/><line x1="41" y1="33" x2="33" y2="41" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round"/></svg></div><div class="hist-empty-title" id="emptyHistTitle">'+L.emptyTitle+'</div></div>';return;}
-  var h='';historyList.forEach(function(it,i){h+='<div class="hist-item" style="animation-delay:'+(i*.04)+'s"><span class="hist-badge '+(it.okng==='OK'?'ok':'ng')+'">'+it.okng+'</span><div class="hist-meta"><div class="hist-date">'+it.date+'</div><div class="hist-code">'+it.barcode+'</div></div><button onclick="viewHistory('+i+')" class="hist-view">'+L.view+'</button></div>';});
+  var h='';historyList.forEach(function(it,i){h+='<div class="hist-item" style="animation-delay:'+(i*.04)+'s"><span class="hist-badge '+(it.okng==='OK'?'ok':'ng')+'">'+it.okng+'</span><div class="hist-meta"><div class="hist-date">'+it.date+'</div><div class="hist-code">'+readableBarcode(it.barcode)+'</div></div><button onclick="viewHistory('+i+')" class="hist-view">'+L.view+'</button></div>';});
   el.innerHTML=h;
 }
 
@@ -1244,7 +1233,14 @@ function viewHistory(i){
   processBarcode(historyList[i].barcode, true);
 }
 
-function clearHistory(){var confirmMsg=currentLang==='ko'?'전체 이력을 삭제하시겠습니까?':currentLang==='es'?'¿Borrar todo el historial?':'Clear all history?';if(confirm(confirmMsg)){historyList=[];var dot=document.getElementById('histDot');if(dot)dot.style.display='none';renderHistory();}}
+function clearHistory(){
+  if(confirm(LANG[currentLang].clearConfirm)){
+    historyList=[];
+    storeSet(STORE_KEY_HIST,historyList);
+    updateHistDot();
+    renderHistory();
+  }
+}
 
 /* ── Scanner ── */
 // 스캐너 시작: 이미 전환 중이거나 스캔 중이면 무시
@@ -1252,14 +1248,33 @@ function startScan(){
   if(isCameraTransitioning) return;
   if(html5QrCode && html5QrCode.isScanning) return;
 
-  document.getElementById('scanOverlay').classList.add('open');
-  if(!html5QrCode) html5QrCode = new Html5Qrcode("qr-reader");
+  if(typeof Html5Qrcode === 'undefined'){
+    alert(LANG[currentLang].camErr);
+    return;
+  }
 
+  document.getElementById('scanOverlay').classList.add('open');
+  if(!html5QrCode){
+    // H/KMC 2D 바코드는 Data Matrix / QR이므로 두 포맷만 디코딩 → 인식 속도 향상, 오인식 감소
+    html5QrCode = new Html5Qrcode("qr-reader", {
+      formatsToSupport:[
+        Html5QrcodeSupportedFormats.DATA_MATRIX,
+        Html5QrcodeSupportedFormats.QR_CODE
+      ],
+      verbose:false
+    });
+  }
+
+  scanHandled = false;
   isCameraTransitioning = true;
   html5QrCode.start(
     {facingMode:"environment"},
     {fps:10, qrbox:{width:250,height:250}},
     function(dt){
+      // 카메라 정지 전까지 같은 바코드가 여러 번 인식될 수 있으므로 첫 결과만 처리
+      if(scanHandled) return;
+      scanHandled = true;
+      if(navigator.vibrate) navigator.vibrate(80);
       // 스캔 성공: 카메라 종료 후 결과 처리
       closeScanner().then(function(){
         isCameraTransitioning = false;
@@ -1271,7 +1286,7 @@ function startScan(){
     isCameraTransitioning = false;
   }).catch(function(err){
     console.error('Camera start error:', err);
-    alert(currentLang==='ko'?'카메라 접근에 실패했습니다.\n카메라 권한을 확인해주세요.':'Camera access failed.\nPlease check camera permissions.');
+    alert(LANG[currentLang].camErr);
     isCameraTransitioning = false;
     document.getElementById('scanOverlay').classList.remove('open');
   });
@@ -1300,7 +1315,15 @@ function closeScanner(){
   return Promise.resolve();
 }
 
-setLang('ko');
+// 다른 앱으로 전환하거나 화면이 꺼지면 카메라를 끔 (배터리·권한 표시 문제 방지)
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden && document.getElementById('scanOverlay').classList.contains('open')){
+    closeScanner();
+  }
+});
+
+setLang(storeGet(STORE_KEY_LANG,'ko'));
+updateHistDot();
 
 /* ── Lottie 초기화 ── */
 (function(){
@@ -1309,7 +1332,7 @@ setLang('ko');
 
   function initLottie(){
     var container = document.getElementById('lottieContainer');
-    if(!container) return;
+    if(!container || typeof lottie === 'undefined') return;
     anim = lottie.loadAnimation({
       container: container,
       renderer: 'svg',
